@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"kubevirt.io/kubevirt/tests/decorators"
+	"kubevirt.io/kubevirt/tests/watcher"
 
 	expect "github.com/google/goexpect"
 	vsv1 "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
@@ -733,6 +734,71 @@ var _ = SIGDescribe("VirtualMachineSnapshot Tests", func() {
 				}
 			})
 
+			It("should report appropriate event when freeze fails", func() {
+				// Activate SELinux and reboot machine so we can force fsfreeze failure
+				const userData = "#cloud-config\n" +
+					"password: fedora\n" +
+					"chpasswd: { expire: False }\n" +
+					"runcmd:\n" +
+					"  - sudo sed -i 's/^SELINUX=.*/SELINUX=enforcing/' /etc/selinux/config\n"
+
+				vmi := libvmi.NewFedora(
+					libvmi.WithCloudInitNoCloudUserData(userData),
+					libvmi.WithNamespace(testsuite.GetTestNamespace(nil)))
+
+				dv := libdv.NewDataVolume(
+					libdv.WithBlankImageSource(),
+					libdv.WithPVC(libdv.PVCWithStorageClass(snapshotStorageClass), libdv.PVCWithVolumeSize(cd.BlankVolumeSize)),
+				)
+
+				vm = libvmi.NewVirtualMachine(vmi, libvmi.WithDataVolumeTemplate(dv))
+				// Adding snapshotable volume
+				libstorage.AddDataVolume(vm, "blank", dv)
+
+				vm, vmi = createAndStartVM(vm)
+				libwait.WaitForSuccessfulVMIStart(vmi,
+					libwait.WithTimeout(300),
+				)
+
+				Eventually(matcher.ThisVMI(vmi), 1*time.Minute, 2*time.Second).Should(matcher.HaveConditionTrue(v1.VirtualMachineInstanceAgentConnected))
+
+				// Restart VM again to enable SELinux
+				Expect(virtClient.VirtualMachineInstance(vmi.Namespace).SoftReboot(context.Background(), vmi.Name)).ToNot(HaveOccurred())
+				Eventually(matcher.ThisVMI(vmi), 3*time.Minute, 2*time.Second).Should(matcher.HaveConditionTrue(v1.VirtualMachineInstanceAgentConnected))
+
+				blankDisk := "/dev/"
+				Eventually(func() bool {
+					vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, &metav1.GetOptions{})
+					Expect(err).ToNot(HaveOccurred())
+					for _, volStatus := range vmi.Status.VolumeStatus {
+						if volStatus.Name == "blank" {
+							blankDisk += volStatus.Target
+							return true
+						}
+					}
+					return false
+				}, 30*time.Second, time.Second).Should(BeTrue())
+
+				// Recreating one specific SELinux error.
+				// Better described in https://bugzilla.redhat.com/show_bug.cgi?id=2237678
+				Expect(console.LoginToFedora(vmi)).To(Succeed())
+				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
+					&expect.BSnd{S: "mkdir /mount_dir\n"},
+					&expect.BExp{R: console.PromptExpression},
+					&expect.BSnd{S: fmt.Sprintf("mkfs.ext4 %s\n", blankDisk)},
+					&expect.BExp{R: console.PromptExpression},
+					&expect.BSnd{S: fmt.Sprintf("mount %s /mount_dir\n", blankDisk)},
+					&expect.BExp{R: console.PromptExpression},
+				}, 20)).To(Succeed())
+
+				snapshot = newSnapshot()
+				_, err = virtClient.VirtualMachineSnapshot(snapshot.Namespace).Create(context.Background(), snapshot, metav1.CreateOptions{})
+				Expect(err).ToNot(HaveOccurred())
+
+				objectEventWatcher := watcher.New(vmi).SinceWatchedObjectResourceVersion().Timeout(time.Duration(30) * time.Second)
+				objectEventWatcher.WaitFor(context.Background(), watcher.WarningEvent, "FreezeError")
+			})
+
 			It("Calling Velero hooks should freeze/unfreeze VM", func() {
 				By("Creating VM")
 				vmi := tests.NewRandomFedoraVMI()
@@ -1331,13 +1397,19 @@ var _ = SIGDescribe("VirtualMachineSnapshot Tests", func() {
 				libstorage.DeleteDataVolume(&dv)
 			})
 
-			DescribeTable("should accurately report DataVolume provisioning", func(vmif func(string) *v1.VirtualMachineInstance) {
+			DescribeTable("should accurately report DataVolume provisioning", func(storageOptFun func(string, string) libvmi.Option, memory string) {
 				dataVolume := libdv.NewDataVolume(
 					libdv.WithRegistryURLSourceAndPullMethod(cd.DataVolumeImportUrlForContainerDisk(cd.ContainerDiskAlpine), cdiv1.RegistryPullNode),
 					libdv.WithPVC(libdv.PVCWithStorageClass(snapshotStorageClass)),
 				)
 
-				vmi := vmif(dataVolume.Name)
+				vmi := libvmi.New(
+					libvmi.WithInterface(libvmi.InterfaceDeviceWithMasqueradeBinding()),
+					libvmi.WithNetwork(v1.DefaultPodNetwork()),
+					libvmi.WithResourceMemory(memory),
+					libvmi.WithNamespace(testsuite.GetTestNamespace(nil)),
+					storageOptFun("disk0", dataVolume.Name),
+				)
 				vm = libvmi.NewVirtualMachine(vmi)
 
 				_, err := virtClient.VirtualMachine(vm.Namespace).Create(context.Background(), vm)
@@ -1360,8 +1432,8 @@ var _ = SIGDescribe("VirtualMachineSnapshot Tests", func() {
 						vm.Status.VolumeSnapshotStatuses[0].Enabled
 				}, 180*time.Second, 1*time.Second).Should(BeTrue())
 			},
-				Entry("with DataVolume volume", tests.NewRandomVMIWithDataVolume),
-				Entry("with PVC volume", tests.NewRandomVMIWithPVC),
+				Entry("with DataVolume volume", libvmi.WithDataVolume, "1Gi"),
+				Entry("with PVC volume", libvmi.WithPersistentVolumeClaim, "128Mi"),
 			)
 
 			It("[test_id:9705]Should show included and excluded volumes in the snapshot", func() {
@@ -1386,9 +1458,14 @@ var _ = SIGDescribe("VirtualMachineSnapshot Tests", func() {
 				dv, err = virtClient.CdiClient().CdiV1beta1().DataVolumes(testsuite.GetTestNamespace(nil)).Create(context.Background(), excludedDataVolume, metav1.CreateOptions{})
 				Expect(err).ToNot(HaveOccurred())
 
-				vmi := tests.NewRandomVMI()
-				vmi = tests.AddPVCDisk(vmi, "snapshotablevolume", v1.DiskBusVirtio, includedDataVolume.Name)
-				vmi = tests.AddPVCDisk(vmi, "notsnapshotablevolume", v1.DiskBusVirtio, excludedDataVolume.Name)
+				vmi := libvmi.New(
+					libvmi.WithInterface(libvmi.InterfaceDeviceWithMasqueradeBinding()),
+					libvmi.WithNetwork(v1.DefaultPodNetwork()),
+					libvmi.WithResourceMemory("128Mi"),
+					libvmi.WithNamespace(testsuite.GetTestNamespace(nil)),
+					libvmi.WithPersistentVolumeClaim("snapshotablevolume", includedDataVolume.Name),
+					libvmi.WithPersistentVolumeClaim("notsnapshotablevolume", excludedDataVolume.Name),
+				)
 				vm = libvmi.NewVirtualMachine(vmi)
 
 				_, err := virtClient.VirtualMachine(vm.Namespace).Create(context.Background(), vm)

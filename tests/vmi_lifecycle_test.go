@@ -349,8 +349,8 @@ var _ = Describe("[rfe_id:273][crit:high][arm64][vendor:cnv-qe@redhat.com][level
 				tests.AddEphemeralDisk(vmi, "disk2", v1.DiskBusVirtio, cd.ContainerDiskFor(cd.ContainerDiskCirros))
 
 				By("setting boot order")
-				vmi = tests.AddBootOrderToDisk(vmi, "disk0", &alpineBootOrder)
-				vmi = tests.AddBootOrderToDisk(vmi, "disk2", &cirrosBootOrder)
+				vmi = addBootOrderToDisk(vmi, "disk0", &alpineBootOrder)
+				vmi = addBootOrderToDisk(vmi, "disk2", &cirrosBootOrder)
 				By("starting VMI")
 				vmi = tests.RunVMIAndExpectLaunch(vmi, 60)
 
@@ -711,10 +711,10 @@ var _ = Describe("[rfe_id:273][crit:high][arm64][vendor:cnv-qe@redhat.com][level
 				_, err = kubevirt.Client().KubeVirt(kv.Namespace).Update(kv)
 				Expect(err).ToNot(HaveOccurred(), "Should update kubevirt infra placement")
 
-				Eventually(func() bool {
+				Eventually(func() error {
 					_, err := kubevirt.Client().CoreV1().Pods(virtHandler.Namespace).Get(context.Background(), virtHandler.Name, metav1.GetOptions{})
-					return k8serrors.IsNotFound(err)
-				}, 120*time.Second, 1*time.Second).Should(BeTrue(), "The virthandler pod should be gone")
+					return err
+				}, 120*time.Second, 1*time.Second).Should(MatchError(k8serrors.IsNotFound, "k8serrors.IsNotFound"), "The virt-handler pod should be gone")
 			})
 
 			It("[test_id:1634]the node controller should mark the node as unschedulable when the virt-handler heartbeat has timedout", func() {
@@ -1831,4 +1831,14 @@ func nowAsJSONWithOffset(offset time.Duration) string {
 	data, err := json.Marshal(now)
 	Expect(err).ToNot(HaveOccurred(), "Should marshal to json")
 	return strings.Trim(string(data), `"`)
+}
+
+func addBootOrderToDisk(vmi *v1.VirtualMachineInstance, diskName string, bootorder *uint) *v1.VirtualMachineInstance {
+	for i, d := range vmi.Spec.Domain.Devices.Disks {
+		if d.Name == diskName {
+			vmi.Spec.Domain.Devices.Disks[i].BootOrder = bootorder
+			return vmi
+		}
+	}
+	return vmi
 }

@@ -22,7 +22,7 @@ package libvmi
 import (
 	kvirtv1 "kubevirt.io/api/core/v1"
 
-	"kubevirt.io/kubevirt/tests/libnet"
+	"kubevirt.io/kubevirt/tests/libnet/cloudinit"
 )
 
 // WithInterface adds a Domain Device Interface.
@@ -42,7 +42,7 @@ func WithNetwork(network *kvirtv1.Network) Option {
 }
 
 func WithMasqueradeNetworking(ports ...kvirtv1.Port) []Option {
-	networkData := libnet.CreateDefaultCloudInitNetworkData()
+	networkData := cloudinit.CreateDefaultCloudInitNetworkData()
 	return []Option{
 		WithInterface(InterfaceDeviceWithMasqueradeBinding(ports...)),
 		WithNetwork(kvirtv1.DefaultPodNetwork()),
@@ -103,6 +103,15 @@ func InterfaceWithPasstBindingPlugin(ports ...kvirtv1.Port) kvirtv1.Interface {
 		Name:    kvirtv1.DefaultPodNetwork().Name,
 		Binding: &kvirtv1.PluginBinding{Name: passtBindingName},
 		Ports:   ports,
+	}
+}
+
+// InterfaceWithMacvtapBindingPlugin returns an Interface named "default" with "macvtap" binding plugin.
+func InterfaceWithMacvtapBindingPlugin(name string) *kvirtv1.Interface {
+	const macvtapBindingName = "macvtap"
+	return &kvirtv1.Interface{
+		Name:    name,
+		Binding: &kvirtv1.PluginBinding{Name: macvtapBindingName},
 	}
 }
 

@@ -43,6 +43,7 @@ aliases:
     - 0xFelix
     - lyarwood
     - fossedihelm
+    - victortoso
 
   #
   # SIG Test
@@ -85,8 +86,11 @@ aliases:
   # SIG Storage
   # Owns anything related to storage.
   #
-  sig-storage-approvers: []
-  sig-storage-reviewers: []
+  sig-storage-approvers:
+    - mhenriks
+  sig-storage-reviewers:
+    - awels
+    - akalenyu
 
   #
   # SIG API
@@ -117,8 +121,10 @@ aliases:
   # Owns everything which is taking place on a node, for example
   # (but not limited to) groups, SELinux, node labels, …
   #
-  sig-node-approvers: []
-  sig-node-reviewers: []
+  sig-node-approvers:
+    - jean-edouard
+  sig-node-reviewers:
+    - victortoso
 
   #
   # SIG Observability
@@ -139,8 +145,10 @@ aliases:
   # SIG Buildsystem
   # Owns bazel, and ensures that kubevirt can be build.
   #
-  sig-buildsystem-approvers: []
-  sig-buildsystem-reviewers: []
+  sig-buildsystem-approvers:
+    - dhiller
+  sig-buildsystem-reviewers:
+    - brianmcarey
 
   #
   # SIG Architecture

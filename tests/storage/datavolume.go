@@ -323,7 +323,12 @@ var _ = SIGDescribe("DataVolume Integration", func() {
 					libdv.WithPVC(libdv.PVCWithStorageClass(sc)),
 				)
 
-				vmi := tests.NewRandomVMIWithPVC(dataVolume.Name)
+				vmi := libvmi.New(
+					libvmi.WithInterface(libvmi.InterfaceDeviceWithMasqueradeBinding()),
+					libvmi.WithNetwork(v1.DefaultPodNetwork()),
+					libvmi.WithPersistentVolumeClaim("disk0", dataVolume.Name),
+					libvmi.WithResourceMemory("128Mi"),
+				)
 
 				dataVolume, err = virtClient.CdiClient().CdiV1beta1().DataVolumes(testsuite.GetTestNamespace(nil)).Create(context.Background(), dataVolume, metav1.CreateOptions{})
 				Expect(err).ToNot(HaveOccurred())
@@ -346,8 +351,10 @@ var _ = SIGDescribe("DataVolume Integration", func() {
 
 			It("should accurately report DataVolume provisioning", func() {
 				sc, err := libstorage.GetSnapshotStorageClass(virtClient)
-				if err != nil {
-					Skip("no snapshot storage class configured")
+				Expect(err).ToNot(HaveOccurred())
+
+				if sc == "" {
+					Skip("Skiping test, no VolumeSnapshot support")
 				}
 
 				dataVolume := libdv.NewDataVolume(
@@ -962,7 +969,7 @@ var _ = SIGDescribe("DataVolume Integration", func() {
 
 				dv, err := virtClient.CdiClient().CdiV1beta1().DataVolumes(vm.Namespace).Get(context.TODO(), dvt.Name, metav1.GetOptions{})
 				if libstorage.IsDataVolumeGC(virtClient) {
-					Expect(errors.IsNotFound(err)).To(BeTrue())
+					Expect(err).To(MatchError(errors.IsNotFound, "k8serrors.IsNotFound"))
 					return
 				}
 				Expect(err).ToNot(HaveOccurred())

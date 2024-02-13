@@ -30,6 +30,8 @@ import (
 	"strings"
 	"time"
 
+	"kubevirt.io/kubevirt/tests/libpod"
+
 	expect "github.com/google/goexpect"
 	"github.com/google/uuid"
 	. "github.com/onsi/ginkgo/v2"
@@ -64,7 +66,6 @@ import (
 	"kubevirt.io/kubevirt/tests/framework/kubevirt"
 	. "kubevirt.io/kubevirt/tests/framework/matcher"
 	"kubevirt.io/kubevirt/tests/libnode"
-	"kubevirt.io/kubevirt/tests/libpod"
 	"kubevirt.io/kubevirt/tests/libstorage"
 	"kubevirt.io/kubevirt/tests/libvmi"
 	"kubevirt.io/kubevirt/tests/testsuite"
@@ -561,7 +562,7 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 			Expect(vmi.Status.VirtualMachineRevisionName).To(Equal(expectedVMRevisionName))
 
 			cr, err := virtClient.AppsV1().ControllerRevisions(vm.Namespace).Get(context.Background(), oldVMRevisionName, k8smetav1.GetOptions{})
-			Expect(errors.IsNotFound(err)).To(BeTrue())
+			Expect(err).To(MatchError(errors.IsNotFound, "k8serrors.IsNotFound"))
 
 			cr, err = virtClient.AppsV1().ControllerRevisions(vm.Namespace).Get(context.Background(), vmi.Status.VirtualMachineRevisionName, k8smetav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
@@ -751,7 +752,7 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 				zeroGracePeriod := int64(0)
 				// Checks if the old VMI Pod still exists after force-restart command
 				Eventually(func() string {
-					pod, err := tests.GetRunningPodByLabel(string(vmi.UID), v1.CreatedByLabel, vm.Namespace, "")
+					pod, err := libpod.GetRunningPodByLabel(virtClient, string(vmi.UID), v1.CreatedByLabel, vm.Namespace, "")
 					if err != nil {
 						return err.Error()
 					}
@@ -925,10 +926,10 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 					Expect(migrateCommand()).To(Succeed())
 
 					By("Check that no migration was actually created")
-					Consistently(func() bool {
+					Consistently(func() error {
 						_, err = virtClient.VirtualMachineInstanceMigration(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
-						return errors.IsNotFound(err)
-					}, 60*time.Second, 5*time.Second).Should(BeTrue(), "migration should not be created in a dry run mode")
+						return err
+					}, 60*time.Second, 5*time.Second).Should(MatchError(errors.IsNotFound, "k8serrors.IsNotFound"), "migration should not be created in a dry run mode")
 				})
 			})
 
@@ -1003,10 +1004,10 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 					}, 10)).To(Succeed())
 
 					By("Waiting for the VMI to disappear")
-					Eventually(func() bool {
+					Eventually(func() error {
 						_, err := virtClient.VirtualMachineInstance(vm.Namespace).Get(context.Background(), vm.Name, &k8smetav1.GetOptions{})
-						return errors.IsNotFound(err)
-					}, time.Minute, time.Second).Should(BeTrue())
+						return err
+					}, time.Minute, time.Second).Should(MatchError(errors.IsNotFound, "k8serrors.IsNotFound"))
 				})
 
 				It("should restart a failed VMI", func() {
@@ -1586,7 +1587,7 @@ status:
 
 				_, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(context.Background(), vm.Name, &k8smetav1.GetOptions{})
 				Expect(err).To(HaveOccurred())
-				Expect(errors.IsNotFound(err)).To(BeTrue())
+				Expect(err).To(MatchError(errors.IsNotFound, "k8serrors.IsNotFound"))
 			})
 
 			DescribeTable("in stop command", func(flags ...string) {
@@ -1862,10 +1863,10 @@ status:
 			Expect(err).ToNot(HaveOccurred())
 
 			By("Ensure the vm has disappeared")
-			Eventually(func() bool {
+			Eventually(func() error {
 				vm, err = virtClient.VirtualMachine(vm.Namespace).Get(context.Background(), vm.Name, &k8smetav1.GetOptions{})
-				return errors.IsNotFound(err)
-			}, 2*time.Minute, 1*time.Second).Should(BeTrue(), fmt.Sprintf("vm %s is not deleted", vm.Name))
+				return err
+			}, 2*time.Minute, 1*time.Second).Should(MatchError(errors.IsNotFound, "k8serrors.IsNotFound"), fmt.Sprintf("vm %s is not deleted", vm.Name))
 		})
 
 		It("should be added when the vm is created and removed when the vm is being deleted", func() {
@@ -1957,6 +1958,17 @@ status:
 
 	Context("[Serial] when node becomes unhealthy", Serial, func() {
 		const componentName = "virt-handler"
+		var nodeName string
+
+		AfterEach(func() {
+			libpod.DeleteKubernetesAPIBlackhole(getHandlerNodePod(virtClient, nodeName), componentName)
+			Eventually(func(g Gomega) {
+				g.Expect(getHandlerNodePod(virtClient, nodeName).Items[0]).To(HaveConditionTrue(k8sv1.PodReady))
+			}, 120*time.Second, time.Second).Should(Succeed())
+
+			tests.WaitForConfigToBePropagatedToComponent("kubevirt.io=virt-handler", util.GetCurrentKv(virtClient).ResourceVersion,
+				tests.ExpectResourceVersionToBeLessEqualThanConfigVersion, 120*time.Second)
+		})
 
 		It("[Serial] the VMs running in that node should be respawned", func() {
 			By("Starting VM")
@@ -1964,17 +1976,14 @@ status:
 			vmi, err := virtClient.VirtualMachineInstance(vm.Namespace).Get(context.Background(), vm.Name, &k8smetav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 
-			nodeName := vmi.Status.NodeName
+			nodeName = vmi.Status.NodeName
 			oldUID := vmi.UID
 
 			By("Blocking virt-handler from reconciling the VMI")
-			libpod.AddKubernetesApiBlackhole(getHandlerNodePod(virtClient, nodeName), componentName)
-			Eventually(getHandlerNodePod(virtClient, nodeName).Items[0], 120*time.Second, time.Second, HaveConditionFalse(k8sv1.PodReady))
-
-			DeferCleanup(func() {
-				libpod.DeleteKubernetesApiBlackhole(getHandlerNodePod(virtClient, nodeName), componentName)
-				Eventually(getHandlerNodePod(virtClient, nodeName).Items[0], 120*time.Second, time.Second, HaveConditionTrue(k8sv1.PodReady))
-			})
+			libpod.AddKubernetesAPIBlackhole(getHandlerNodePod(virtClient, nodeName), componentName)
+			Eventually(func(g Gomega) {
+				g.Expect(getHandlerNodePod(virtClient, nodeName).Items[0]).To(HaveConditionFalse(k8sv1.PodReady))
+			}, 120*time.Second, time.Second).Should(Succeed())
 
 			pod, err := libvmi.GetPodByVirtualMachineInstance(vmi, vmi.Namespace)
 			Expect(err).ToNot(HaveOccurred())

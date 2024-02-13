@@ -96,7 +96,8 @@ var _ = SIGDescribe("Storage", func() {
 
 	BeforeEach(func() {
 		virtClient = kubevirt.Client()
-		tests.SetupAlpineHostPath()
+		libstorage.CreateHostPathPv("alpine-host-path", testsuite.GetTestNamespace(nil), testsuite.HostPathAlpine)
+		libstorage.CreateHostPathPVC("alpine-host-path", testsuite.GetTestNamespace(nil), "1Gi")
 	})
 
 	Describe("Starting a VirtualMachineInstance", func() {
@@ -1035,7 +1036,7 @@ var _ = SIGDescribe("Storage", func() {
 			})
 
 			Context("With a USB device", func() {
-				It("should successfully start and have the USB storage device attached", func() {
+				It("[test_id:9797]should successfully start and have the USB storage device attached", func() {
 					vmi = libvmi.NewAlpine(
 						libvmi.WithEmptyDisk("emptydisk1", v1.DiskBusUSB, resource.MustParse("128Mi")),
 					)
@@ -1383,10 +1384,10 @@ var _ = SIGDescribe("Storage", func() {
 
 func waitForPodToDisappearWithTimeout(podName string, seconds int) {
 	virtClient := kubevirt.Client()
-	EventuallyWithOffset(1, func() bool {
+	EventuallyWithOffset(1, func() error {
 		_, err := virtClient.CoreV1().Pods(testsuite.GetTestNamespace(nil)).Get(context.Background(), podName, metav1.GetOptions{})
-		return errors.IsNotFound(err)
-	}, seconds, 1*time.Second).Should(BeTrue())
+		return err
+	}, seconds, 1*time.Second).Should(MatchError(errors.IsNotFound, "k8serrors.IsNotFound"))
 }
 
 func createBlockDataVolume(virtClient kubecli.KubevirtClient) (*cdiv1.DataVolume, error) {
