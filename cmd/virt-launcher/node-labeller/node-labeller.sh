@@ -4,8 +4,10 @@ set -xeo pipefail
 
 ARCH=$(uname -m)
 MACHINE=q35
-if [ "$ARCH" == "ppc64le" ]; then
+if [ "$ARCH" == "aarch64" ]; then
   MACHINE=virt
+elif [ "$ARCH" == "ppc64le" ]; then
+  MACHINE=pseries-8.1
 elif [ "$ARCH" != "x86_64" ]; then
   exit 0
 fi
@@ -31,6 +33,9 @@ if [ -e /dev/sev ]; then
   # QEMU requires RW access to query SEV capabilities
   chmod o+rw /dev/sev
 fi
+
+mkdir -p /var/lib/kubevirt-node-labeller
+VIRTTYPE=qemu
 
 virtqemud -d
 
